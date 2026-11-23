@@ -40,3 +40,5 @@ body{touch-action:pan-y}
   .modal-head{margin-bottom:10px}
   .plan-form textarea{resize:none}
 }
+
+body:has(.modal-backdrop),body:has(.tour-backdrop){overflow:hidden;position:fixed;width:100%;}
