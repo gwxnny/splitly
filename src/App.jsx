@@ -80,7 +80,7 @@ function App(){
     try{
       const {data:{session:activeSession},error:sessionError}=await supabase.auth.getSession();
       if(sessionError)throw sessionError;
-      if(!activeSession){setSession(null);setSettings(false);setAuthMode('signin');setProfileMsg('Your sign-in session has expired. Please sign in again, then save your profile.');setBusy(false);return;}
+      if(!activeSession){setSession(null);setSettings(false);setAuthMode('signin');setAuthMsg('Your sign-in session has expired. Please sign in again, then save your profile.');setBusy(false);return;}
       const {data,error}=await supabase.auth.updateUser({data:{display_name:name,avatar_emoji:profileAvatarDraft}});
       if(error)throw error;
       setSession(current=>current?{...current,user:data.user||current.user}:current);
