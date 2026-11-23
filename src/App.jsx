@@ -77,7 +77,7 @@ function App(){
     setDisplayName(name);setAvatarEmoji(profileAvatarDraft);setProfileMsg('Profile saved successfully.');
   }
   function openNew(){setEditing(null);setDraft({...blank,months:'',amounts:[]});setModal(true);}
-  function openEdit(p){setEditing(p);setDraft({...p,schedule_type:'variable',amounts:p.items.map(i=>String(i.amount)),months:p.items.length,total_amount:String(p.items.reduce((s,i)=>s+Number(i.amount),0))});setModal(true);}
+  function openEdit(p){setEditing(p);setDraft({...p,start_month:monthKeyFrom(p.start_month),schedule_type:'variable',amounts:p.items.map(i=>String(i.amount)),months:p.items.length,total_amount:String(p.items.reduce((s,i)=>s+Number(i.amount),0))});setModal(true);}
   function setField(k,v){setDraft(d=>({...d,[k]:v}));}
   function changeMonths(n){
     if(n===''){setDraft(d=>({...d,months:'',amounts:[]}));return;}
