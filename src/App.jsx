@@ -198,7 +198,7 @@ function App(){
   async function importData(e){
     const file=e.target.files?.[0];if(!file)return;
     try{const parsed=JSON.parse(await file.text());if(!Array.isArray(parsed))throw Error('Backup must be a Splitly JSON array.');
-      for(const p of parsed){const items=p.items||p.payment_items||[];const {data,error}=await supabase.from('installment_plans').insert({user_id:session.user.id,name:p.name,category:p.category||'wallet',method:p.method,notes:p.notes,start_month:p.start_month,due_day:p.due_day||1,total_amount:p.total_amount}).select().single();if(error)throw error;
+      for(const p of parsed){const items=p.items||p.payment_items||[];const {data,error}=await supabase.from('installment_plans').insert({user_id:session.user.id,name:p.name,category:p.category||'wallet',icon_color:p.icon_color||'#F8E3E8',method:p.method,notes:p.notes,start_month:p.start_month,due_day:p.due_day||1,total_amount:p.total_amount}).select().single();if(error)throw error;
         if(items.length){const {error:ie}=await supabase.from('payment_items').insert(items.map(i=>({user_id:session.user.id,plan_id:data.id,month:i.month,amount:i.amount,due_date:i.due_date,paid:!!i.paid,paid_at:i.paid_at||null})));if(ie)throw ie;}}
       await loadPlans();alert('Backup imported.');
     }catch(err){alert(`Import failed: ${err.message}`);}e.target.value='';
