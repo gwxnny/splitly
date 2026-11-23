@@ -17,7 +17,7 @@ const monthKeyFrom = value => String(value || '').slice(0,7);
 const monthLabel = d => d.toLocaleDateString('en-SG',{month:'long',year:'numeric'});
 const dateFor = (ym, day=1) => `${ym}-${String(day).padStart(2,'0')}`;
 const today = new Date();
-const blank = {name:'',category:'shopping-bag',method:'',notes:'',start_month:monthKey(today),due_day:1,schedule_type:'variable',total_amount:'',months:'',amounts:[]};
+const blank = {name:'',category:'shopping-bag',icon_color:'#F8E3E8',method:'',notes:'',start_month:monthKey(today),due_day:'',schedule_type:'variable',total_amount:'',months:'',amounts:[]};
 
 function App(){
   const [session,setSession]=useState(null), [authReady,setAuthReady]=useState(false);
@@ -28,7 +28,7 @@ function App(){
   const [displayName,setDisplayName]=useState(''), [avatarEmoji,setAvatarEmoji]=useState('🐼');
   const [profileNameDraft,setProfileNameDraft]=useState(''), [profileAvatarDraft,setProfileAvatarDraft]=useState('🐼'), [profileMsg,setProfileMsg]=useState('');
   const [plans,setPlans]=useState([]), [selected,setSelected]=useState(new Date(today.getFullYear(),today.getMonth(),1));
-  const [modal,setModal]=useState(false), [editing,setEditing]=useState(null), [draft,setDraft]=useState(blank);
+  const [modal,setModal]=useState(false), [editing,setEditing]=useState(null), [draft,setDraft]=useState(blank), [formError,setFormError]=useState('');
   const [filter,setFilter]=useState('active'), [sort,setSort]=useState('due'), [search,setSearch]=useState('');
   const [settings,setSettings]=useState(false), [tour,setTour]=useState(false), [tourStep,setTourStep]=useState(0), [busy,setBusy]=useState(false);
   const configured=!!supabase;
@@ -59,7 +59,7 @@ function App(){
   async function loadPlans(){
     const {data,error}=await supabase.from('installment_plans').select('*, payment_items(*)').order('created_at',{ascending:false});
     if(error){console.error(error);return;}
-    setPlans((data||[]).map(p=>({...p,items:(p.payment_items||[]).sort((a,b)=>a.month.localeCompare(b.month))})));
+    setPlans((data||[]).map(p=>({...p,items:(Array.isArray(p.payment_items)?p.payment_items:[]).sort((a,b)=>String(a.month||'').localeCompare(String(b.month||'')))})));
   }
   async function authSubmit(e){
     e.preventDefault();setAuthMsg('');setBusy(true);
@@ -88,9 +88,9 @@ function App(){
     }catch(error){setProfileMsg(error.message||'Could not save your profile. Please try again.');}
     setBusy(false);
   }
-  function openNew(){setEditing(null);setDraft({...blank,months:'',amounts:[]});setModal(true);}
-  function openEdit(p){setEditing(p);setDraft({...p,start_month:monthKeyFrom(p.start_month),schedule_type:'variable',amounts:p.items.map(i=>String(i.amount)),months:p.items.length,total_amount:String(p.items.reduce((s,i)=>s+Number(i.amount),0))});setModal(true);}
-  function setField(k,v){setDraft(d=>({...d,[k]:v}));}
+  function openNew(){setEditing(null);setFormError('');setDraft({...blank,months:'',amounts:[]});setModal(true);}
+  function openEdit(p){const items=Array.isArray(p?.items)?p.items:[];setEditing(p);setFormError('');setDraft({...blank,...p,icon_color:p.icon_color||'#F8E3E8',due_day:p.due_day==null?'':String(p.due_day),start_month:monthKeyFrom(p.start_month),schedule_type:'variable',amounts:items.map(i=>String(i?.amount??'')),months:String(items.length),total_amount:String(items.reduce((s,i)=>s+Number(i?.amount||0),0))});setModal(true);}
+  function setField(k,v){setFormError('');setDraft(d=>({...d,[k]:v}));}
   function changeMonths(n){
     if(n===''){setDraft(d=>({...d,months:'',amounts:[]}));return;}
     const count=Number(n);
@@ -110,29 +110,71 @@ function App(){
     if(values.length!==count||values.some(v=>!Number.isFinite(v)||v<=0))throw Error('Please enter an amount for every month shown.');
     return values;
   }
+  function friendlyError(error){
+    const code=error?.code||'';
+    if(code==='23505')return 'This payment month already exists. Please review the schedule and try again.';
+    if(code==='23514'||code==='22P02')return 'One of the values is invalid. Check the date and payment amounts.';
+    if(code==='42501')return 'You do not have permission to change this plan. Please sign in again.';
+    if(code==='PGRST116')return 'The payment plan could not be found. Refresh the page and try again.';
+    if(error?.name==='TypeError'||/null|undefined/i.test(error?.message||''))return 'Some payment details are missing. Please check the form and try again.';
+    if(/fetch|network/i.test(error?.message||''))return 'A network error interrupted the save. Check your connection and try again.';
+    return error?.message||'Something went wrong while saving. Please try again.';
+  }
   async function savePlan(e){
-    e.preventDefault();setBusy(true);
+    e.preventDefault();if(busy)return;setFormError('');setBusy(true);
+    let planId=editing?.id, previousItems=null, previousPlan=null, planWasUpdated=false, itemsWereReplaced=false;
     try{
+      const name=String(draft.name||'').trim();
+      if(!name)throw Error('Please enter a merchant or bill name.');
+      if(name.length>120)throw Error('The merchant or bill name must be 120 characters or fewer.');
+      const dueDay=Number(draft.due_day);
+      if(!draft.due_day||!Number.isInteger(dueDay)||dueDay<1||dueDay>28)throw Error('Please enter a due day between 1 and 28.');
+      if(!/^\d{4}-\d{2}$/.test(draft.start_month||''))throw Error('Please choose a valid first payment month.');
       const amounts=makeSchedule();
-      const payload={name:draft.name.trim(),category:draft.category,method:draft.method.trim()||null,notes:draft.notes.trim()||null,start_month:dateFor(draft.start_month,1),due_day:Number(draft.due_day)||1,total_amount:Number(amounts.reduce((a,b)=>a+b,0).toFixed(2))};
-      if(!payload.name)throw Error('Please enter a merchant or bill name.');
-      if(!supabase)throw Error('Supabase is not configured.');
-      let planId=editing?.id;
+      if(!supabase)throw Error('Supabase is not configured. Please check your app connection.');
+      if(!session?.user?.id)throw Error('Your sign-in session has expired. Please sign in again.');
+      const payload={name,category:draft.category||'wallet',icon_color:draft.icon_color||'#F8E3E8',method:String(draft.method||'').trim()||null,notes:String(draft.notes||'').trim()||null,start_month:dateFor(draft.start_month,1),due_day:dueDay,total_amount:Number(amounts.reduce((a,b)=>a+b,0).toFixed(2))};
+      const startDate=new Date(draft.start_month+'-01T12:00:00');
+      if(Number.isNaN(startDate.getTime()))throw Error('Please choose a valid first payment month.');
       if(editing){
-        const {error}=await supabase.from('installment_plans').update(payload).eq('id',planId);
-        if(error)throw error;
-        const {error:delError}=await supabase.from('payment_items').delete().eq('plan_id',planId);
-        if(delError)throw delError;
+        previousPlan={name:editing.name,category:editing.category,icon_color:editing.icon_color||'#F8E3E8',method:editing.method??null,notes:editing.notes??null,start_month:editing.start_month,due_day:editing.due_day,total_amount:editing.total_amount};
+        previousItems=(Array.isArray(editing.items)?editing.items:[]).map(({id,created_at,...item})=>item);
+        const scheduleUnchanged=previousItems.length===amounts.length&&previousItems.every((item,i)=>{
+          const d=new Date(startDate.getFullYear(),startDate.getMonth()+i,1);
+          return String(item.month).slice(0,10)===dateFor(monthKey(d),1)&&Number(item.amount)===amounts[i]&&String(item.due_date).slice(0,10)===dateFor(monthKey(d),Math.min(28,dueDay));
+        });
+        const {error:updateError}=await supabase.from('installment_plans').update(payload).eq('id',planId);
+        if(updateError)throw updateError;
+        planWasUpdated=true;
+        if(!scheduleUnchanged){
+          const paidByMonth=new Map(previousItems.map(item=>[String(item.month).slice(0,7),{paid:!!item.paid,paid_at:item.paid_at||null}]));
+          const rows=amounts.map((amount,i)=>{
+            const d=new Date(startDate.getFullYear(),startDate.getMonth()+i,1), month=dateFor(monthKey(d),1), prior=paidByMonth.get(month.slice(0,7));
+            return {plan_id:planId,user_id:session.user.id,month,amount,due_date:dateFor(monthKey(d),Math.min(28,dueDay)),paid:prior?.paid||false,paid_at:prior?.paid_at||null};
+          });
+          const {error:deleteError}=await supabase.from('payment_items').delete().eq('plan_id',planId);
+          if(deleteError)throw deleteError;
+          itemsWereReplaced=true;
+          const {error:insertError}=await supabase.from('payment_items').insert(rows);
+          if(insertError)throw insertError;
+        }
       }else{
         const {data,error}=await supabase.from('installment_plans').insert({...payload,user_id:session.user.id}).select().single();
-        if(error)throw error;planId=data.id;
+        if(error)throw error;
+        if(!data?.id)throw Error('The plan was created but its ID was not returned. Refresh and check your payment list before trying again.');
+        planId=data.id;
+        const rows=amounts.map((amount,i)=>{const d=new Date(startDate.getFullYear(),startDate.getMonth()+i,1);return {plan_id:planId,user_id:session.user.id,month:dateFor(monthKey(d),1),amount,due_date:dateFor(monthKey(d),Math.min(28,dueDay)),paid:false};});
+        const {error:insertError}=await supabase.from('payment_items').insert(rows);
+        if(insertError)throw insertError;
       }
-      const start=new Date(`${draft.start_month}-01T12:00:00`);
-      const rows=amounts.map((amount,i)=>{const d=new Date(start.getFullYear(),start.getMonth()+i,1);return {plan_id:planId,user_id:session.user.id,month:dateFor(monthKey(d),1),amount,due_date:dateFor(monthKey(d),Math.min(28,Math.max(1,Number(draft.due_day)||1))),paid:false};});
-      const {error}=await supabase.from('payment_items').insert(rows);if(error)throw error;
-      await loadPlans();setModal(false);
-    }catch(err){alert(err.message||'Could not save this plan.');}
-    setBusy(false);
+      await loadPlans();setModal(false);setEditing(null);
+    }catch(err){
+      if(editing&&planWasUpdated){
+        if(itemsWereReplaced&&previousItems){await supabase.from('payment_items').delete().eq('plan_id',planId);if(previousItems.length)await supabase.from('payment_items').insert(previousItems);}
+        if(previousPlan)await supabase.from('installment_plans').update(previousPlan).eq('id',planId);
+      }else if(!editing&&planId){await supabase.from('installment_plans').delete().eq('id',planId);}
+      setFormError(friendlyError(err));
+    }finally{setBusy(false);}
   }
   async function togglePaid(item){
     const {error}=await supabase.from('payment_items').update({paid:!item.paid,paid_at:!item.paid?new Date().toISOString():null}).eq('id',item.id);
@@ -156,7 +198,7 @@ function App(){
   async function importData(e){
     const file=e.target.files?.[0];if(!file)return;
     try{const parsed=JSON.parse(await file.text());if(!Array.isArray(parsed))throw Error('Backup must be a Splitly JSON array.');
-      for(const p of parsed){const items=p.items||p.payment_items||[];const {data,error}=await supabase.from('installment_plans').insert({user_id:session.user.id,name:p.name,category:p.category||'wallet',method:p.method,notes:p.notes,start_month:p.start_month,due_day:p.due_day||1,total_amount:p.total_amount}).select().single();if(error)throw error;
+      for(const p of parsed){const items=p.items||p.payment_items||[];const {data,error}=await supabase.from('installment_plans').insert({user_id:session.user.id,name:p.name,category:p.category||'wallet',icon_color:p.icon_color||'#F8E3E8',method:p.method,notes:p.notes,start_month:p.start_month,due_day:p.due_day||1,total_amount:p.total_amount}).select().single();if(error)throw error;
         if(items.length){const {error:ie}=await supabase.from('payment_items').insert(items.map(i=>({user_id:session.user.id,plan_id:data.id,month:i.month,amount:i.amount,due_date:i.due_date,paid:!!i.paid,paid_at:i.paid_at||null})));if(ie)throw ie;}}
       await loadPlans();alert('Backup imported.');
     }catch(err){alert(`Import failed: ${err.message}`);}e.target.value='';
@@ -179,11 +221,11 @@ function App(){
       {sorted.length===0?<div className="empty-state"><div className="empty-illustration">🐼</div><h3>{plans.length?'No plans match this view':'Your list is looking lovely and empty.'}</h3><p className="muted">{plans.length?'Try another filter or search term.':'Add your first installment or bill to get started.'}</p>{!plans.length&&<button className="primary" onClick={openNew}><Plus size={17}/> Add your first plan</button>}</div>:<div className="plan-grid">{sorted.map(p=>{
         const all=p.items.length,done=p.items.filter(i=>i.paid).length,next=p.items.find(i=>!i.paid),current=p.items.find(i=>monthKeyFrom(i.month)===selectedKey);
         const days=next?Math.ceil((new Date(next.due_date+'T23:59:59')-new Date())/86400000):null;
-        return <article className="plan-card" key={p.id}><div className="plan-top"><div className="merchant-icon"><Icon name={p.category}/></div><div className="plan-title"><h3>{p.name}</h3><p>{p.method||'Payment plan'}{p.notes?` · ${p.notes}`:''}</p></div><button className="more-button" onClick={()=>openEdit(p)} aria-label={`Edit ${p.name}`}><Pencil size={16}/></button></div><div className="plan-amount-row"><div><span className="mini-label">THIS MONTH</span><strong>{current?money(current.amount):'—'}</strong></div><div className="next-due">{next?<><span className="mini-label">NEXT DUE</span><strong>{new Date(next.due_date+'T12:00:00').toLocaleDateString('en-SG',{day:'numeric',month:'short'})}</strong>{days!==null&&days>=0&&days<=5&&!next.paid&&<span className="due-badge">Due soon</span>}</>:<span className="completed-label"><Check size={14}/> Completed</span>}</div></div><div className="progress-meta"><span>{done} of {all} paid</span><span>{Math.round(done/all*100)}%</span></div><div className="progress-track"><div className="progress-fill" style={{width:`${done/all*100}%`}}/></div><div className="installment-list">{p.items.slice(0,4).map(i=><button className={`installment-chip ${i.paid?'is-paid':''}`} key={i.id} onClick={()=>togglePaid(i)} title={`${i.month}: ${money(i.amount)}`}><span>{new Date(`${monthKeyFrom(i.month)}-01T12:00:00`).toLocaleDateString('en-SG',{month:'short'})}</span><strong>{money(i.amount)}</strong><span className="chip-check">{i.paid?<Check size={13}/>:<span className="empty-check"/>}</span></button>)}{p.items.length>4&&<span className="more-months">+{p.items.length-4} months</span>}</div><div className="card-bottom"><span>{money(p.items.filter(i=>!i.paid).reduce((s,i)=>s+Number(i.amount),0))} remaining</span><button className="delete-link" onClick={()=>deletePlan(p)}><Trash2 size={14}/> Delete</button></div></article>
+        return <article className="plan-card" key={p.id}><div className="plan-top"><div className="merchant-icon" style={{backgroundColor:(p.icon_color||'#F8E3E8')+'33',color:p.icon_color||'#A45F7A'}}><Icon name={p.category}/></div><div className="plan-title"><h3>{p.name}</h3><p>{p.method||'Payment plan'}{p.notes?` · ${p.notes}`:''}</p></div><button className="more-button" onClick={()=>openEdit(p)} aria-label={`Edit ${p.name}`}><Pencil size={16}/></button></div><div className="plan-amount-row"><div><span className="mini-label">THIS MONTH</span><strong>{current?money(current.amount):'—'}</strong></div><div className="next-due">{next?<><span className="mini-label">NEXT DUE</span><strong>{new Date(next.due_date+'T12:00:00').toLocaleDateString('en-SG',{day:'numeric',month:'short'})}</strong>{days!==null&&days>=0&&days<=5&&!next.paid&&<span className="due-badge">Due soon</span>}</>:<span className="completed-label"><Check size={14}/> Completed</span>}</div></div><div className="progress-meta"><span>{done} of {all} paid</span><span>{Math.round(done/all*100)}%</span></div><div className="progress-track"><div className="progress-fill" style={{width:`${done/all*100}%`}}/></div><div className="installment-list">{p.items.slice(0,4).map(i=><button className={`installment-chip ${i.paid?'is-paid':''}`} key={i.id} onClick={()=>togglePaid(i)} title={`${i.month}: ${money(i.amount)}`}><span>{new Date(`${monthKeyFrom(i.month)}-01T12:00:00`).toLocaleDateString('en-SG',{month:'short'})}</span><strong>{money(i.amount)}</strong><span className="chip-check">{i.paid?<Check size={13}/>:<span className="empty-check"/>}</span></button>)}{p.items.length>4&&<span className="more-months">+{p.items.length-4} months</span>}</div><div className="card-bottom"><span>{money(p.items.filter(i=>!i.paid).reduce((s,i)=>s+Number(i.amount),0))} remaining</span><button className="delete-link" onClick={()=>deletePlan(p)}><Trash2 size={14}/> Delete</button></div></article>
       })}</div>}
       <footer className="footer-note">A little more organised, one payment at a time <span>♡</span></footer>
     </main>
-    {modal&&<div className="modal-backdrop" onMouseDown={e=>{if(e.target===e.currentTarget)setModal(false);}}><form className="modal-card plan-form" onSubmit={savePlan}><div className="modal-head"><div><p className="eyebrow">{editing?'MAKE A CHANGE':'ADD SOMETHING NEW'}</p><h2>{editing?'Edit payment plan':'New installment or bill'}</h2></div><button type="button" className="icon-button" onClick={()=>setModal(false)}><X size={19}/></button></div><label>Merchant or bill name<input value={draft.name} onChange={e=>setField('name',e.target.value)} required placeholder="e.g. iPhone, SP Utilities"/></label><label>Choose an icon</label><div className="icon-picker">{icons.map(([id,C])=><button type="button" key={id} className={draft.category===id?'selected':''} onClick={()=>setField('category',id)} title={id}><C size={19}/></button>)}</div><div className="form-row"><label>Payment method / provider<input value={draft.method||''} onChange={e=>setField('method',e.target.value)} placeholder="e.g. Atome, DBS Visa"/></label><label>Due day<input type="number" min="1" max="28" inputMode="numeric" value={draft.due_day||1} onChange={e=>setField('due_day',e.target.value)} placeholder="e.g. 10"/><span className="field-hint">Enter the day number only. For a bill due on 10 December, enter 10. It repeats each month.</span></label></div><label>First payment month<input type="month" value={draft.start_month} onChange={e=>setField('start_month',e.target.value)} required/></label><label>How do you want to enter the payments?</label><div className="segmented"><button type="button" className={draft.schedule_type==='variable'?'active':''} onClick={()=>setField('schedule_type','variable')}>Different amount each month</button><button type="button" className={draft.schedule_type==='equal'?'active':''} onClick={()=>setField('schedule_type','equal')}>Same amount each month</button></div>{draft.schedule_type==='equal'?<><div className="form-row"><label>Total amount (S$)<input type="number" min="0.01" step="0.01" value={draft.total_amount} onChange={e=>setField('total_amount',e.target.value)} placeholder="e.g. 600" required/></label><label>Number of monthly payments<input type="number" min="1" max="60" value={draft.months} onChange={e=>changeMonths(e.target.value)} placeholder="e.g. 12" required/></label></div>{Number(draft.total_amount)>0&&Number(draft.months)>0&&<p className="calculation-note">That works out to about {money(Number(draft.total_amount)/Number(draft.months))} each month. We’ll split the total for you.</p>}</>:<><label>How many monthly payments? <span className="optional">(1–60)</span><input type="number" min="1" max="60" step="1" inputMode="numeric" value={draft.months} onChange={e=>changeMonths(e.target.value)} placeholder="Type a number, e.g. 12" required/></label><p className="schedule-help">Once you enter the number of months, a separate amount box will appear for every month below.</p>{Number(draft.months)>=1&&Number(draft.months)<=60&&Number.isInteger(Number(draft.months))&&<><div className="amount-grid">{Array.from({length:Number(draft.months)||0},(_,i)=>draft.amounts[i]??'').map((amount,i)=><label key={i}><span>Payment {i+1} · {new Date(new Date(`${draft.start_month}-01T12:00:00`).getFullYear(),new Date(`${draft.start_month}-01T12:00:00`).getMonth()+i,1).toLocaleDateString('en-SG',{month:'short',year:'numeric'})}</span><input type="number" min="0.01" step="0.01" inputMode="decimal" value={amount} onChange={e=>setField('amounts',Array.from({length:Number(draft.months)||0},(_,j)=>j===i?e.target.value:(draft.amounts[j]??'')))} placeholder="Enter amount (S$)" required/></label>)}</div><p className="calculation-note">Total of your monthly amounts: {money(draft.amounts.reduce((s,v)=>s+(Number(v)||0),0))}</p></>}</>}<label>Notes <span className="optional">(optional)</span><textarea rows="2" value={draft.notes||''} onChange={e=>setField('notes',e.target.value)} placeholder="A little detail to help you remember…"/></label><button className="primary full" disabled={busy}>{busy?'Saving…':editing?'Save changes':'Add to Splitly'}</button></form></div>}
+    {modal&&<div className="modal-backdrop" onMouseDown={e=>{if(e.target===e.currentTarget)setModal(false);}}><form className="modal-card plan-form" onSubmit={savePlan}><div className="modal-head"><div><p className="eyebrow">{editing?'MAKE A CHANGE':'ADD SOMETHING NEW'}</p><h2>{editing?'Edit payment plan':'New installment or bill'}</h2></div><button type="button" className="icon-button" onClick={()=>setModal(false)}><X size={19}/></button></div><label>Merchant or bill name<input value={draft.name} onChange={e=>setField('name',e.target.value)} required placeholder="e.g. iPhone, SP Utilities"/></label><label>Choose an icon</label><div className="icon-picker">{icons.map(([id,C])=><button type="button" key={id} className={draft.category===id?'selected':''} onClick={()=>setField('category',id)} title={id} style={draft.category===id?{color:draft.icon_color,backgroundColor:draft.icon_color+'24',borderColor:draft.icon_color}:{}}><C size={19}/></button>)}</div><label>Icon colour</label><div className="icon-colour-picker">{['#E98FB2','#8E79D6','#5C9BCB','#5DAD83','#E69A52','#D96C72','#8299D1','#8F7B82','#333333'].map(color=><button type="button" key={color} className={draft.icon_color===color?'selected':''} style={{'--icon-swatch':color}} onClick={()=>setField('icon_color',color)} aria-label={'Use icon colour '+color}/>)}</div><label className="custom-icon-colour">Custom<input type="color" value={draft.icon_color||'#F8E3E8'} onChange={e=>setField('icon_color',e.target.value)}/></label><div className="form-row"><label>Payment method / provider<input value={draft.method||''} onChange={e=>setField('method',e.target.value)} placeholder="e.g. Atome, DBS Visa"/></label><label>Due day<input type="number" min="1" max="28" inputMode="numeric" value={draft.due_day??''} onChange={e=>setField('due_day',e.target.value)} placeholder="e.g. 10"/></label></div><label>First payment month<input type="month" value={draft.start_month} onChange={e=>setField('start_month',e.target.value)} required/></label><label>How do you want to enter the payments?</label><div className="segmented"><button type="button" className={draft.schedule_type==='variable'?'active':''} onClick={()=>setField('schedule_type','variable')}>Custom amount each month</button><button type="button" className={draft.schedule_type==='equal'?'active':''} onClick={()=>setField('schedule_type','equal')}>Same amount each month</button></div>{draft.schedule_type==='equal'?<><div className="form-row"><label>Total amount (S$)<input type="number" min="0.01" step="0.01" value={draft.total_amount} onChange={e=>setField('total_amount',e.target.value)} placeholder="e.g. 600" required/></label><label>Number of monthly payments<input type="number" min="1" max="60" value={draft.months} onChange={e=>changeMonths(e.target.value)} placeholder="e.g. 12" required/></label></div>{Number(draft.total_amount)>0&&Number(draft.months)>0&&<p className="calculation-note">That works out to about {money(Number(draft.total_amount)/Number(draft.months))} each month. We’ll split the total for you.</p>}</>:<><label>How many monthly payments? <span className="optional">(1–60)</span><input type="number" min="1" max="60" step="1" inputMode="numeric" value={draft.months} onChange={e=>changeMonths(e.target.value)} placeholder="Type a number, e.g. 12" required/></label><p className="schedule-help">Once you enter the number of months, a separate amount box will appear for every month below.</p>{Number(draft.months)>=1&&Number(draft.months)<=60&&Number.isInteger(Number(draft.months))&&<><div className="amount-grid">{Array.from({length:Number(draft.months)||0},(_,i)=>draft.amounts[i]??'').map((amount,i)=><label key={i}><span>Payment {i+1} · {new Date(new Date(`${draft.start_month}-01T12:00:00`).getFullYear(),new Date(`${draft.start_month}-01T12:00:00`).getMonth()+i,1).toLocaleDateString('en-SG',{month:'short',year:'numeric'})}</span><input type="number" min="0.01" step="0.01" inputMode="decimal" value={amount} onChange={e=>setField('amounts',Array.from({length:Number(draft.months)||0},(_,j)=>j===i?e.target.value:(draft.amounts[j]??'')))} placeholder="Enter amount (S$)" required/></label>)}</div><p className="calculation-note">Total of your monthly amounts: {money(draft.amounts.reduce((s,v)=>s+(Number(v)||0),0))}</p></>}</>}<label>Notes <span className="optional">(optional)</span><textarea rows="2" value={draft.notes||''} onChange={e=>setField('notes',e.target.value)} placeholder="A little detail to help you remember…"/></label>{formError&&<p className="form-error" role="alert">{formError}</p>}<button className="primary full" disabled={busy}>{busy?'Saving…':editing?'Save changes':'Add to Splitly'}</button></form></div>}
     {settings&&<div className="modal-backdrop" onMouseDown={e=>{if(e.target===e.currentTarget)setSettings(false);}}><div className="modal-card settings-card"><div className="modal-head"><div><p className="eyebrow">YOUR SPACE</p><h2>Profile & settings</h2></div><button className="icon-button" onClick={()=>setSettings(false)}><X size={19}/></button></div><form className="profile-editor" onSubmit={saveProfile}><div className="profile-preview"><span>{profileAvatarDraft}</span><div><strong>{profileNameDraft.trim()||'Your name'}</strong><small>Your Splitly profile</small></div></div><label>Display name<input value={profileNameDraft} onChange={e=>setProfileNameDraft(e.target.value)} maxLength="40" placeholder="What should we call you?"/></label><label>Choose your avatar</label><div className="avatar-picker">{['🐼','🐻','🐰','🐱','🐸','🦊','🐨','🐧','🌷','💗','⭐','🍓'].map(emoji=><button type="button" key={emoji} className={profileAvatarDraft===emoji?'selected':''} onClick={()=>setProfileAvatarDraft(emoji)} aria-label={`Choose ${emoji}`}>{emoji}</button>)}</div><button className="primary full" type="submit" disabled={busy}>{busy?"Saving…":"Save profile"}</button>{profileMsg&&<p className="profile-message">{profileMsg}</p>}</form><div className="settings-divider"/><section className="appearance-settings"><p className="eyebrow">MAKE IT YOURS</p><h3>Appearance</h3><span className="appearance-label">Colour mode</span><div className="appearance-toggle"><button type="button" className={themeMode==='light'?'active':''} onClick={()=>setThemeMode('light')}>☀️ Light</button><button type="button" className={themeMode==='dark'?'active':''} onClick={()=>setThemeMode('dark')}>🌙 Dark</button></div><span className="appearance-label">Accent colour</span><div className="accent-options">{['#FFB3D0','#B9A7F5','#A9D8F2','#A8DDBB','#FFC58F','#F08E91','#9CB7E8','#B7A1A0'].map(color=><button type="button" key={color} className={accentColor.toLowerCase()===color.toLowerCase()?'selected':''} style={{'--swatch':color}} onClick={()=>setAccentColor(color)} aria-label={'Use '+color+' accent'}/>)}</div><label className="custom-accent">Or choose any colour<input type="color" value={accentColor} onChange={e=>setAccentColor(e.target.value)}/></label></section><div className="settings-divider"/><p className="muted">Keep a copy of your payment records, just in case.</p><button className="setting-action" onClick={exportData}><Download size={18}/> Export all plans as JSON</button><label className="setting-action upload-action"><Upload size={18}/> Import a Splitly JSON backup<input type="file" accept="application/json,.json" onChange={importData}/></label><button className="setting-action" onClick={()=>{setSettings(false);setTour(true);setTourStep(0);}}><CircleHelp size={18}/> Replay the quick tour</button><button className="setting-action signout" onClick={signOut}><LogOut size={18}/> Sign out</button><p className="setup-hint">Your data is stored in your private Supabase account. Keep exported backups somewhere safe.</p></div></div>}
     {tour&&<div className="tour-backdrop"><div className="tour-card"><div className="tour-top"><span className="tour-count">A QUICK TOUR · {tourStep+1} OF 4</span><button className="icon-button" onClick={()=>setTour(false)}><X size={18}/></button></div><div className="tour-emoji">{['💗','🧾','🌱','🗓️'][tourStep]}</div><h2>{['See your monthly picture','Add your payment amounts','Mark each payment as paid','Look a little further ahead'][tourStep]}</h2><p>{['Your monthly overview shows what is due, what you have paid, and what is still left to pay.','Add the bill name and first payment month. Choose “Different amount each month”, enter how many payments you have, then fill in each month’s amount.','Tap a payment on a plan when you have paid it. Your progress updates automatically.','Use the arrows beside the month to see what is coming up next.'][tourStep]}</p><div className="tour-dots">{[0,1,2,3].map(i=><span className={i===tourStep?'active':''} key={i}/>)}</div><div className="tour-actions"><button className="text-button" onClick={()=>setTour(false)}>Skip tour</button><button className="primary" onClick={()=>{if(tourStep===3)setTour(false);else setTourStep(s=>s+1);}}>{tourStep===3?'Let’s go':'Next'} <ArrowRight size={16}/></button></div></div></div>}
   </div>;
