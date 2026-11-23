@@ -58,3 +58,5 @@ body:has(.modal-backdrop),body:has(.tour-backdrop){overflow:hidden;position:fixe
 
 
 .icon-colour-picker{display:flex;flex-wrap:wrap;gap:10px;padding:2px 0 4px}.icon-colour-picker button{width:27px;height:27px;border-radius:50%;border:2px solid transparent;background:var(--icon-swatch);cursor:pointer}.icon-colour-picker button.selected{outline:2px solid var(--ink);outline-offset:2px}.form-error{margin:0;padding:10px 12px;border-radius:10px;background:#fff0f2;color:#a33e55;font-size:12px;line-height:1.5;border:1px solid #f3cbd4}.theme-dark .form-error{background:#3b252d;color:#ffc1ce;border-color:#68404b}.modal-backdrop,.tour-backdrop{inset:0;min-height:100dvh;height:100dvh}
+
+.custom-icon-colour{display:inline-flex;align-items:center;gap:7px;font-size:11px;font-weight:600;color:var(--muted)}.custom-icon-colour input{width:34px;height:30px;padding:2px;border:1px solid var(--line);border-radius:8px;background:transparent}
